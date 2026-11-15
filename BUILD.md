@@ -5,8 +5,16 @@
 | 功能 | 位置 | 说明 |
 |---|---|---|
 | SukiSU Ultra | `KernelSU/`（git 子模块） | 分支 `builtin`（KernelSU + KPM + SUSFS 一体），内核侧通过软链 `drivers/kernelsu -> ../KernelSU/kernel` 引用 |
+| avc_spoof | `kernel-patches/avc-spoof.diff` | 从上游 `main` 移植到 `builtin` 的 AVC 日志伪装（`KSU_FEATURE_AVC_SPOOF`，id 10003）。**编译时自动应用**，见下 |
 | SUSFS v2.4.0 | `fs/susfs.c` 等 27 个文件 | `susfs4ksu` 的 `gki-android13-5.15` 补丁，零冲突 |
 | 机型配置 | `arch/arm64/configs/vendor/socrates-sukisu.config` | 叠加在 `gki_defconfig` + `kalama_GKI.config` + `socrates_GKI.config` 之上 |
+
+`avc_spoof` 只存在于上游 `main`，而 `CONFIG_KSU_SUSFS*` 只存在于 `builtin`，两个分支单用都凑不齐。
+补丁在编译前由 `build-socrates.sh` 打到子模块工作区，**不提交进子模块**，因此：
+
+- `git status` 里 `KernelSU` 会显示为 modified，这是预期的
+- `git submodule update --force KernelSU` 之后再编译会自动重新打上
+- 补丁目录叫 `kernel-patches/`、文件用 `.diff`，因为内核树的 `.gitignore` 忽略了 `patches/` 和 `*.patch`
 
 ## 0. 拉取
 

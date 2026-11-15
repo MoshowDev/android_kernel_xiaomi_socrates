@@ -147,6 +147,22 @@ if [ ! -d "$REPO/drivers/kernelsu" ]; then
 fi
 echo "kernelsu: $(git -C "$REPO/KernelSU" log --oneline -1 2>/dev/null || echo unknown)"
 
+step "local kernelsu patches"
+# The avc_spoof feature exists on upstream main only; builtin carries the SUSFS
+# options instead. This patch ports it across, and is applied here rather than
+# committed so the submodule keeps pointing at an upstream commit.
+# Reverse-check first: the submodule worktree may still carry it from an
+# earlier build.
+for p in "$REPO"/kernel-patches/*.diff; do
+    [ -f "$p" ] || continue
+    if git -C "$REPO/KernelSU" apply --reverse --check "$p" 2>/dev/null; then
+        echo "already applied: $(basename "$p")"
+    else
+        git -C "$REPO/KernelSU" apply "$p"
+        echo "applied        : $(basename "$p")"
+    fi
+done
+
 step "locating clang"
 if [ -z "${CLANG_DIR:-}" ]; then
     for c in "$REPO/../toolchain/clang-repo/clang-r450784d" \
