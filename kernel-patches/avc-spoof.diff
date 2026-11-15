@@ -1,0 +1,433 @@
+diff --git a/kernel/extension/extension.c b/kernel/extension/extension.c
+index b42aed7a..d67843f1 100644
+--- a/kernel/extension/extension.c
++++ b/kernel/extension/extension.c
+@@ -37,16 +37,16 @@ static const char *const extension_names[KSU_EXTENSION_MAX] = {
+ 
+ /*
+  * Force-extension bitmap (parallel to policy/feature.c).
+- * Each set bit in forced_mask means "userspace cannot change this
++ * Each set bit in extension_forced_mask means "userspace cannot change this
+  * extension anymore"; the saved value lives in extension_forced_values[id] and
+  * is replayed on every boot through either ops->set (value-flavored)
+- * or handler->apply_forced (io-flavored). forced_pending is the
++ * or handler->apply_forced (io-flavored). extension_forced_pending is the
+  * replay backlog: bits stay set until ksu_extension_apply_forced()
+  * successfully replays them.
+  */
+ static u64 extension_forced_values[KSU_EXTENSION_MAX];
+-static DECLARE_BITMAP(forced_mask, KSU_EXTENSION_MAX);
+-static DECLARE_BITMAP(forced_pending, KSU_EXTENSION_MAX);
++static DECLARE_BITMAP(extension_forced_mask, KSU_EXTENSION_MAX);
++static DECLARE_BITMAP(extension_forced_pending, KSU_EXTENSION_MAX);
+ 
+ /*
+  * Set to true at the end of ksu_extension_register_all() so that
+@@ -123,8 +123,8 @@ static int force_extension_param_set(const char *val,
+         }
+ 
+         extension_forced_values[id] = value;
+-        set_bit(id, forced_mask);
+-        set_bit(id, forced_pending);
++        set_bit(id, extension_forced_mask);
++        set_bit(id, extension_forced_pending);
+         pr_info("extension: %s (id=%u) forced to %llu\n",
+                 extension_names[id], id, value);
+     }
+@@ -318,7 +318,7 @@ int ksu_extension_enumerate(u32 index, struct ksu_extension_desc *desc)
+         desc->id = id;
+         desc->caps = KSU_FEATURE_FLAG_SUPPORTED | handler->caps;
+         desc->min_api_version = handler->min_api_version;
+-        desc->forced = test_bit(id, forced_mask) ? 1 : 0;
++        desc->forced = test_bit(id, extension_forced_mask) ? 1 : 0;
+         strscpy(desc->name, handler->name ? handler->name : "unknown",
+                 sizeof(desc->name));
+         ret = 0;
+@@ -338,8 +338,8 @@ int ksu_extension_set(u32 extension_id, u32 caller_api_version, u64 value)
+ 
+     /* Forced extensions are locked for the lifetime of the boot.
+      * Replay is done in ksu_extension_apply_forced(); userspace
+-     * SETs are refused until reboot clears forced_pending. */
+-    if (test_bit(extension_id, forced_mask)) {
++     * SETs are refused until reboot clears extension_forced_pending. */
++    if (test_bit(extension_id, extension_forced_mask)) {
+         pr_warn("extension: extension %u is forced by boot config\n",
+                 extension_id);
+         return -EPERM;
+@@ -366,7 +366,7 @@ out:
+ bool ksu_extension_is_forced(u32 extension_id)
+ {
+     return extension_id < KSU_EXTENSION_MAX &&
+-           test_bit(extension_id, forced_mask);
++           test_bit(extension_id, extension_forced_mask);
+ }
+ 
+ int ksu_extension_ioctl(u32 extension_id, u32 caller_api_version, void __user *raw)
+@@ -402,7 +402,7 @@ int ksu_extension_wipe(u32 extension_id, u32 caller_api_version)
+      * the same way ksu_extension_set() does. Allowing wipe while
+      * userspace SET is locked would let a manager action undo the
+      * kernel-side forced state until the next boot. */
+-    if (test_bit(extension_id, forced_mask)) {
++    if (test_bit(extension_id, extension_forced_mask)) {
+         pr_warn("extension: extension %u is forced by boot config, refusing wipe\n",
+                 extension_id);
+         return -EPERM;
+@@ -445,7 +445,7 @@ void ksu_extension_apply_forced(void)
+ 
+     mutex_lock(&extension_mutex);
+ 
+-    for_each_set_bit (id, forced_pending, KSU_EXTENSION_MAX) {
++    for_each_set_bit (id, extension_forced_pending, KSU_EXTENSION_MAX) {
+         handler = extension_handlers[id];
+         if (!handler) {
+             /*
+@@ -459,7 +459,7 @@ void ksu_extension_apply_forced(void)
+              */
+             pr_warn("extension: force_extension=%s=%llu pending: handler not registered\n",
+                     extension_names[id], extension_forced_values[id]);
+-            clear_bit(id, forced_pending);
++            clear_bit(id, extension_forced_pending);
+             continue;
+         }
+ 
+@@ -469,7 +469,7 @@ void ksu_extension_apply_forced(void)
+          *   2. apply_forced  — io-flavoured handlers, kernel-side
+          *                       callback that receives the raw u64.
+          *                       No user pointer is fabricated.
+-         *   3. neither       — log and clear forced_pending. The
++         *   3. neither       — log and clear extension_forced_pending. The
+          *                       old io_handler(id, NULL) fallback
+          *                       was unsafe (NULL is WIPE for
+          *                       umount_paths, EFAULT for others)
+@@ -482,7 +482,7 @@ void ksu_extension_apply_forced(void)
+         } else {
+             pr_warn("extension: force_extension=%s=%llu ignored: handler has no apply_forced and no ops->set\n",
+                     extension_names[id], extension_forced_values[id]);
+-            clear_bit(id, forced_pending);
++            clear_bit(id, extension_forced_pending);
+             continue;
+         }
+ 
+@@ -491,7 +491,7 @@ void ksu_extension_apply_forced(void)
+                     extension_names[id], extension_forced_values[id], ret);
+             continue;
+         }
+-        clear_bit(id, forced_pending);
++        clear_bit(id, extension_forced_pending);
+         pr_info("extension: applied forced %s=%llu\n", extension_names[id],
+                 extension_forced_values[id]);
+     }
+diff --git a/kernel/feature/avc_spoof.c b/kernel/feature/avc_spoof.c
+new file mode 100644
+index 00000000..0f9a530d
+--- /dev/null
++++ b/kernel/feature/avc_spoof.c
+@@ -0,0 +1,219 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * AVC log spoofing.
++ *
++ * Ported from upstream main (kernel/feature/avc_spoof.c) so that the manager's
++ * avc_spoof feature, KSU_FEATURE_AVC_SPOOF (id 10003), also exists on the
++ * builtin branch. The adaptation is mechanical: main splits the boot hook into
++ * runtime/ksud_boot.h and gets PT_REGS_PARM* from arch.h, neither of which
++ * exists here, so the register access is spelled out for the architectures
++ * this tree builds and the late init hangs off on_post_fs_data() instead.
++ *
++ * The audit path receives a target SID. Rewriting it changes only what the log
++ * prints; the AVC decision and the SELinux policy are untouched.
++ */
++#include <linux/atomic.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/kprobes.h>
++#include <linux/ptrace.h>
++#include <linux/security.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/version.h>
++
++#include "policy/feature.h"
++#include "feature/avc_spoof.h"
++
++/*
++ * slow_avc_audit() takes tsid as its third argument up to 6.3, and as its
++ * second from 6.4 on. This tree is 5.15, so only the older form is
++ * implemented; the guard keeps a kernel bump from silently spoofing the wrong
++ * register and producing a plausible looking but wrong result.
++ */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
++#error "avc_spoof: slow_avc_audit changed ABI in 6.4, port the second-argument variant"
++#endif
++
++#if defined(__aarch64__)
++#define KSU_TSID_REG(regs) ((regs)->regs[2])
++#elif defined(__x86_64__)
++#define KSU_TSID_REG(regs) ((regs)->dx)
++#else
++#error "avc_spoof: unsupported architecture"
++#endif
++
++static u32 su_sid;
++static u32 ksu_sid;
++static u32 priv_app_sid;
++
++/* Off until the SIDs resolve and post-fs-data installs the probe. */
++static atomic_t disable_spoof = ATOMIC_INIT(1);
++static bool ksu_avc_spoof_enabled = true;
++static bool boot_completed;
++
++static struct kprobe *slow_avc_audit_kp;
++
++static int slow_avc_audit_pre_handler(struct kprobe *p, struct pt_regs *regs)
++{
++    u32 *tsid;
++
++    (void)p;
++
++    if (atomic_read(&disable_spoof))
++        return 0;
++
++    tsid = (u32 *)&KSU_TSID_REG(regs);
++    if (*tsid == su_sid || *tsid == ksu_sid) {
++        pr_info_ratelimited("avc_spoof: replace tsid %u with %u\n", *tsid, priv_app_sid);
++        *tsid = priv_app_sid;
++    }
++    return 0;
++}
++
++static struct kprobe *init_avc_kprobe(const char *name)
++{
++    struct kprobe *kp = kzalloc(sizeof(*kp), GFP_KERNEL);
++    int ret;
++
++    if (!kp)
++        return NULL;
++
++    kp->symbol_name = name;
++    kp->pre_handler = slow_avc_audit_pre_handler;
++    ret = register_kprobe(kp);
++    pr_info("avc_spoof: register_%s kprobe: %d\n", name, ret);
++    if (ret) {
++        kfree(kp);
++        return NULL;
++    }
++    return kp;
++}
++
++static void destroy_avc_kprobe(struct kprobe **kp_ptr)
++{
++    struct kprobe *kp = *kp_ptr;
++
++    if (!kp)
++        return;
++    unregister_kprobe(kp);
++    synchronize_rcu();
++    kfree(kp);
++    *kp_ptr = NULL;
++}
++
++static int get_avc_sids(void)
++{
++    int ret;
++
++    ret = security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &su_sid);
++    if (ret) {
++        pr_info("avc_spoof: su SID not found\n");
++        return ret;
++    }
++    pr_info("avc_spoof: su SID: %u\n", su_sid);
++
++    ret = security_secctx_to_secid("u:r:ksu:s0", strlen("u:r:ksu:s0"), &ksu_sid);
++    if (ret) {
++        pr_info("avc_spoof: ksu SID not found\n");
++        return ret;
++    }
++    pr_info("avc_spoof: ksu SID: %u\n", ksu_sid);
++
++    ret = security_secctx_to_secid("u:r:priv_app:s0:c512,c768",
++                                   strlen("u:r:priv_app:s0:c512,c768"),
++                                   &priv_app_sid);
++    if (ret) {
++        pr_info("avc_spoof: priv_app SID not found\n");
++        return ret;
++    }
++    pr_info("avc_spoof: priv_app SID: %u\n", priv_app_sid);
++    return 0;
++}
++
++void ksu_avc_spoof_disable(void)
++{
++    pr_info("avc_spoof: unregister slow_avc_audit kprobe\n");
++    destroy_avc_kprobe(&slow_avc_audit_kp);
++    atomic_set(&disable_spoof, 1);
++    pr_info("avc_spoof: slow_avc_audit spoofing disabled\n");
++}
++
++void ksu_avc_spoof_enable(void)
++{
++    int ret = get_avc_sids();
++
++    if (ret) {
++        pr_info("avc_spoof: SID resolution failed: %d\n", ret);
++        return;
++    }
++
++    if (!slow_avc_audit_kp) {
++        pr_info("avc_spoof: register slow_avc_audit kprobe\n");
++        slow_avc_audit_kp = init_avc_kprobe("slow_avc_audit");
++        if (!slow_avc_audit_kp) {
++            atomic_set(&disable_spoof, 1);
++            pr_err("avc_spoof: failed to register slow_avc_audit kprobe\n");
++            return;
++        }
++    }
++    atomic_set(&disable_spoof, 0);
++    pr_info("avc_spoof: slow_avc_audit spoofing enabled\n");
++}
++
++static int avc_spoof_feature_get(u64 *value)
++{
++    *value = ksu_avc_spoof_enabled ? 1 : 0;
++    return 0;
++}
++
++static int avc_spoof_feature_set(u64 value)
++{
++    bool enable = value != 0;
++
++    if (enable == ksu_avc_spoof_enabled) {
++        pr_info("avc_spoof: no need to change\n");
++        return 0;
++    }
++
++    ksu_avc_spoof_enabled = enable;
++    if (boot_completed) {
++        if (enable)
++            ksu_avc_spoof_enable();
++        else
++            ksu_avc_spoof_disable();
++    }
++    pr_info("avc_spoof: set to %d\n", enable);
++    return 0;
++}
++
++static const struct ksu_feature_handler avc_spoof_handler = {
++    .feature_id = KSU_FEATURE_AVC_SPOOF,
++    .name = "avc_spoof",
++    .get_handler = avc_spoof_feature_get,
++    .set_handler = avc_spoof_feature_set,
++};
++
++static bool avc_spoof_registered;
++
++void ksu_avc_spoof_late_init(void)
++{
++    boot_completed = true;
++    if (ksu_avc_spoof_enabled)
++        ksu_avc_spoof_enable();
++}
++
++void __init ksu_avc_spoof_init(void)
++{
++    avc_spoof_registered = !ksu_register_feature_handler(&avc_spoof_handler);
++    if (!avc_spoof_registered)
++        pr_err("avc_spoof: failed to register feature handler\n");
++}
++
++void __exit ksu_avc_spoof_exit(void)
++{
++    if (ksu_avc_spoof_enabled)
++        ksu_avc_spoof_disable();
++    if (avc_spoof_registered)
++        ksu_unregister_feature_handler(KSU_FEATURE_AVC_SPOOF);
++}
+diff --git a/kernel/feature/avc_spoof.h b/kernel/feature/avc_spoof.h
+new file mode 100644
+index 00000000..d6b94744
+--- /dev/null
++++ b/kernel/feature/avc_spoof.h
+@@ -0,0 +1,10 @@
++#ifndef __KSU_H_AVC_SPOOF
++#define __KSU_H_AVC_SPOOF
++
++void ksu_avc_spoof_init(void);
++void ksu_avc_spoof_exit(void);
++
++/* Called from post-fs-data, once SELinux and its policy are up. */
++void ksu_avc_spoof_late_init(void);
++
++#endif // __KSU_H_AVC_SPOOF
+diff --git a/kernel/include/uapi/feature.h b/kernel/include/uapi/feature.h
+index df0acd23..b3e7cbc2 100644
+--- a/kernel/include/uapi/feature.h
++++ b/kernel/include/uapi/feature.h
+@@ -16,6 +16,13 @@ enum ksu_feature_id {
+      */
+     KSU_FEATURE_MOUNT_HIDE = 16,
+ 
++    /*
++     * Ported from upstream main, which allocates this id. It has to keep the
++     * same number here because ksud maps the name to the id on its own side
++     * and would otherwise be told the feature does not exist.
++     */
++    KSU_FEATURE_AVC_SPOOF = 10003,
++
+     KSU_FEATURE_MAX
+ };
+ 
+diff --git a/kernel/ksu_main.c b/kernel/ksu_main.c
+index 60bc7655..54bc3e20 100644
+--- a/kernel/ksu_main.c
++++ b/kernel/ksu_main.c
+@@ -36,6 +36,7 @@
+ #include "feature/sucompat.h"
+ #include "feature/sulog.h"
+ #include "feature/mount_hide.h"
++#include "feature/avc_spoof.h"
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+ #include "feature/selinux_hide.h"
+ #endif
+@@ -127,6 +128,7 @@
+ #endif
+ #include "feature/shell_su_adb_only.c"
+ #include "feature/mount_hide.c"
++#include "feature/avc_spoof.c"
+ #include "runtime/ksud.c"
+ 
+ #include "sulog/event.c"
+@@ -203,6 +205,8 @@ int __init kernelsu_init(void)
+ 
+ 	ksu_mount_hide_init();
+ 
++    ksu_avc_spoof_init();
++
+     ksu_allowlist_init();
+ 
+     ksu_dynamic_manager_load();
+diff --git a/kernel/policy/feature.c b/kernel/policy/feature.c
+index 05ae1636..a5ddcb50 100644
+--- a/kernel/policy/feature.c
++++ b/kernel/policy/feature.c
+@@ -10,6 +10,7 @@ static const char *const feature_names[KSU_FEATURE_MAX] = {
+     [KSU_FEATURE_SELINUX_HIDE] = "selinux_hide",
+     [KSU_FEATURE_SHELL_SU_ADB_ONLY] = "shell_su_adb_only",
+     [KSU_FEATURE_MOUNT_HIDE] = "mount_hide",
++    [KSU_FEATURE_AVC_SPOOF] = "avc_spoof",
+ };
+ 
+ // Features forced by boot config. Written only while parsing module params
+diff --git a/kernel/runtime/ksud.c b/kernel/runtime/ksud.c
+index 930aa461..a95001f8 100644
+--- a/kernel/runtime/ksud.c
++++ b/kernel/runtime/ksud.c
+@@ -58,6 +58,9 @@ void on_post_fs_data(void)
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+     ksu_selinux_hide_handle_post_fs_data();
+ #endif
++    // SELinux policy is loaded by now, so the AVC SIDs resolve and the probe
++    // can be installed.
++    ksu_avc_spoof_late_init();
+     // retry forced features which failed at second stage
+     ksu_feature_apply_forced();
+     ksu_extension_apply_forced();
