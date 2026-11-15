@@ -167,3 +167,6 @@ arch/*/boot/dts/vendor
 
 # Documentation toolchain
 sphinx_*/
+
+.superkey
+boot_stock.img
