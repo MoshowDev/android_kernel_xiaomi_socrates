@@ -152,6 +152,8 @@ jobs:
           BOOT_STOCK_URL: ${{ secrets.BOOT_STOCK_URL }}
         run: |
           set -euo pipefail
+          # Optional. pack_boot.py carries the socrates geometry and vbmeta blob,
+          # so a template is only needed to override the layout.
           tpl=""
           for c in "$CACHE_ROOT/boot_stock.img" "$GITHUB_WORKSPACE/boot_stock.img"; do
             if [ -f "$c" ]; then tpl="$c"; break; fi
@@ -161,11 +163,10 @@ jobs:
             tpl="$CACHE_ROOT/boot_stock.img"
           fi
           if [ -n "$tpl" ]; then
-            echo "template: $tpl ($(stat -c%s "$tpl") bytes)"
+            echo "template override: $tpl ($(stat -c%s "$tpl") bytes)"
             echo "BOOT_TEMPLATE=$tpl" >> "$GITHUB_ENV"
           else
-            echo "no stock boot image on this runner, the build will stop after Image"
-            echo "put one at $CACHE_ROOT/boot_stock.img or set the BOOT_STOCK_URL secret"
+            echo "no template, the built-in socrates layout will be used"
           fi
 
       - name: Build
@@ -189,13 +190,10 @@ jobs:
           if [ "$PATCH_KPM" != "true" ]; then
             args+=(--no-kpm)
           fi
-          if [ "$PACK_BOOT" = "true" ] && [ -n "${BOOT_TEMPLATE:-}" ]; then
-            args+=(--stock "$BOOT_TEMPLATE")
-          else
+          if [ "$PACK_BOOT" != "true" ]; then
             args+=(--no-pack)
-            if [ "$PACK_BOOT" = "true" ]; then
-              echo "::warning::pack_boot requested but no stock template is available, skipping the repack"
-            fi
+          elif [ -n "${BOOT_TEMPLATE:-}" ]; then
+            args+=(--stock "$BOOT_TEMPLATE")
           fi
 
           export OUT="$OUT_DIR"

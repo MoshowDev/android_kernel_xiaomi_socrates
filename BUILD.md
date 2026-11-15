@@ -143,32 +143,33 @@ out/arch/arm64/boot/Image.kp
 superkey 用 `SKEY` 传入；不传则随机生成并写入树根 `.superkey`（权限 600）。
 脚本用 `-S`（只存哈希），明文密钥不进镜像。
 
-## 5. 打包 boot.img（默认已做）
+## 5. 打包 boot.img（默认已做，不需要原厂镜像）
 
-需要你自己设备的原厂 boot.img 当模板——它只能从你的手机或 ROM 包里取，不能随仓库分发。
-脚本默认会在这两个位置找：
+`scripts/pack_boot.py` 里内置了 socrates 的完整布局，**不再需要 boot_stock.img**：
 
 ```
-./boot_stock.img
-../boot_stock.img
+total        100663296   分区大小 96 MiB
+page          4096       内核从 offset 4096 开始
+header        1584       boot header v4
+avb offset   47583232    vbmeta 块位置
+avb blob        2304     OEM 签名的 vbmeta（已 base64 内嵌，附 sha256 校验）
 ```
 
-找到就自动打包，产物是 **`out/boot.img`**，可以直接 fastboot 刷。
-也可以用 `--stock /path/to/boot.img` 显式指定，或 `export STOCK_BOOT=...`。
+产物是 **`out/boot.img`**，可以直接 `fastboot flash`。
 
-一份都没有的话，脚本会在结尾报错并给出取镜像的命令；这时加 `--no-pack` 可以只留 Image。
-
-从手机取（需要 root）：
+需要换底包（别的 ROM、别的设备、或者你从手机重新 dump 的镜像）时再传模板：
 
 ```bash
-adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'
-adb pull /sdcard/boot.img boot_stock.img
+./build-socrates.sh --stock /path/to/boot.img
 ```
 
-`scripts/pack_boot.py` 保持原厂几何布局（内核偏移、AVB 块偏移、分区大小），只替换内核载荷。
+模板会覆盖内置布局，几何参数和 vbmeta 都从模板里读。
 
-注意：boot 里的 vbmeta 是 OEM 私钥签名的，换内核后哈希必然不匹配。解锁状态下可以启动
+内嵌的 vbmeta 描述的是原厂内核，换内核后哈希必然不匹配。解锁状态下可以启动
 （orange state），这与任何第三方 boot 镜像相同，无解。
+
+布局来源：原厂 `boot_b.img`（HyperOS 4，`CP2A.260605.016`）。内嵌布局与用模板打包
+的结果**逐字节一致**，已用 sha256 `f62dc2fd…` 核对过。
 
 ## 6. 刷入
 
@@ -200,18 +201,18 @@ gh run watch
 |---|---|---|
 | `release` | 空 | 内核版本后缀，空则用树自己的 `5.15.223` |
 | `patch_kpm` | `true` | 注入 KernelPatch（KPM 运行时） |
-| `pack_boot` | `true` | 打包 `boot.img`，需要机器上有原厂模板 |
+| `pack_boot` | `true` | 打包 `boot.img`（用内置布局，不需要模板） |
 | `full_rebuild` | `false` | 先删掉增量输出目录，从头编 |
 
-**runner 上需要准备两样东西**（都存在 `~/.cache/socrates` 下，checkout 的 `git clean` 不会删）：
+**runner 上不需要准备任何厂商文件。** 打包所需的几何参数和 vbmeta 块都在
+`scripts/pack_boot.py` 里，clang（2.7 GB）和 KernelPatch 缓存首次运行时自动准备，
+之后直接复用。
 
-1. **boot 模板**：放到 `~/.cache/socrates/boot_stock.img`。没有的话工作流会跳过打包并给出
-   warning，只出内核 Image。
-2. **两个 secret（可选）**：
-   - `KP_SUPERKEY`：KernelPatch 超级密钥。不设的话每次构建随机生成，密钥会变。
-   - `BOOT_STOCK_URL`：模板的直链，runner 上没有本地文件时用它下载。
+两个 secret（都可选）：
 
-clang-r450784d（2.7 GB）和 KernelPatch 缓存都是首次运行时自动准备，之后直接复用。
+- `KP_SUPERKEY`：KernelPatch 超级密钥。不设的话每次构建随机生成，密钥会变。
+- `BOOT_STOCK_URL`：想用别的底包时，用这个直链下发模板，覆盖内置布局。
+
 增量编译依赖 `~/.cache/socrates/out`，所以重复构建通常只要几分钟。
 
 ## 已验证
