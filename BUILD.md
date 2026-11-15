@@ -180,18 +180,22 @@ fastboot flash boot_a out/boot.img
 
 回滚就是刷回原厂 boot。
 
-## 7. GitHub Actions（自建 runner）
+## 7. GitHub Actions
 
-`.github/workflows/build-kernel.yml` 在绑定了家里小服务器的 self-hosted runner 上跑完整流程，
-产出 `Image` / `Image.kp` / `boot.img`，作为 artifact 上传。
+`.github/workflows/build-kernel.yml` 跑完整流程，产出 `Image` / `Image.kp` / `boot.img`，
+作为 artifact 上传。两种 runner 都支持，用 `runner` 参数切换。
 
-**必须在注册了该 runner 的仓库里触发。** 组织级 self-hosted runner 对个人 fork 不可见，
-在 fork 里点 Run workflow 只会一直排队。
+**self-hosted（默认）** 用绑定了家里小服务器的 runner。组织级 runner 只对注册它的仓库可见，
+别人 fork 之后用不了——在 fork 里选 self-hosted 会一直排队到超时。
+
+**github-hosted** 给 fork 用，不需要任何准备。规格是公开仓库 4 核 / 16 GB 内存 / 14 GB 硬盘
+（私有仓库降到 2 核 8 GB）。工作流会先删掉预装的 Android SDK、.NET、ghc 等腾空间，否则
+14 GB 装不下这套构建。
 
 手动触发：
 
 ```bash
-gh workflow run build-kernel -f release=byxingstar
+gh workflow run build-kernel -f runner=self-hosted -f release=byxingstar
 gh run watch
 ```
 
@@ -199,14 +203,19 @@ gh run watch
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
+| `runner` | `self-hosted` | `github-hosted` 用于没有自建 runner 的场景 |
 | `release` | 空 | 内核版本后缀，空则用树自己的 `5.15.223` |
 | `patch_kpm` | `true` | 注入 KernelPatch（KPM 运行时） |
 | `pack_boot` | `true` | 打包 `boot.img`（用内置布局，不需要模板） |
 | `full_rebuild` | `false` | 先删掉增量输出目录，从头编 |
 
-**runner 上不需要准备任何厂商文件。** 打包所需的几何参数和 vbmeta 块都在
-`scripts/pack_boot.py` 里，clang（2.7 GB）和 KernelPatch 缓存首次运行时自动准备，
-之后直接复用。
+**两种 runner 都不需要准备任何厂商文件。** 打包所需的几何参数和 vbmeta 块都在
+`scripts/pack_boot.py` 里。
+
+self-hosted 上 clang（2.7 GB）和 KernelPatch 缓存首次运行后一直复用，增量编译通常几分钟。
+
+github-hosted 的机器是一次性的，`~/.cache/socrates` 留不下来，所以**每次都要重新下 clang
+和 ARM 工具链**（约 3–5 分钟、3 GB 流量），编译时间也翻倍到 35–50 分钟。换来的是零配置。
 
 两个 secret（都可选）：
 

@@ -1,14 +1,12 @@
 name: build-kernel
 
-# Builds the socrates kernel on the self-hosted runner that is attached to the
-# home server.
+# Builds the socrates kernel, either on the self-hosted runner attached to the
+# home server or on a GitHub-hosted runner.
 #
-# Trigger it from the repository that owns the runner. A self-hosted runner
-# registered to an organisation is not visible to a personal fork, so a job
-# asking for it from the fork would sit in the queue forever.
-#
-# runs-on below uses the default labels (self-hosted, linux, x64). If the
-# runner was registered with an extra custom label, add it to that list.
+# A self-hosted runner is only visible to the repository or organisation that
+# registered it, so a fork cannot use it: a job asking for self-hosted in a
+# fork sits in the queue until it times out. Pick github-hosted there instead,
+# which needs no setup but is slower and has a 14 GB disk to work with.
 #
 # Everything expensive lives outside the workspace, under ~/.cache/socrates:
 # the clang toolchain, the KernelPatch checkout, and the incremental build
@@ -17,6 +15,14 @@ name: build-kernel
 on:
   workflow_dispatch:
     inputs:
+      runner:
+        description: "Where to build. self-hosted = your own machine; github-hosted = fork friendly, slower, 14 GB disk."
+        required: false
+        default: self-hosted
+        type: choice
+        options:
+          - self-hosted
+          - github-hosted
       release:
         description: "Kernel release suffix, e.g. byxingstar. Empty keeps the version the tree declares."
         required: false
@@ -28,7 +34,7 @@ on:
         default: true
         type: boolean
       pack_boot:
-        description: "Repack a flashable boot.img from the stock template on the runner"
+        description: "Repack a flashable boot.img (built-in layout, no stock image needed)"
         required: false
         default: true
         type: boolean
@@ -59,10 +65,33 @@ concurrency:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, x64]
+    # github-hosted maps to ubuntu-latest (4 vCPU, 16 GB RAM, 14 GB SSD on a
+    # public repo). Anything else asks for the default self-hosted labels; add
+    # a custom label here if the runner was registered with one.
+    runs-on: ${{ inputs.runner == 'github-hosted' && 'ubuntu-latest' || fromJSON('["self-hosted","linux","x64"]') }}
     timeout-minutes: 120
 
     steps:
+      - name: Free disk space
+        if: inputs.runner == 'github-hosted'
+        run: |
+          set -euo pipefail
+          # The kernel build plus clang needs roughly 9 GB steady state and a
+          # bit more while clang is being fetched, against a 14 GB disk. The
+          # pre-installed SDKs are not used here.
+          echo "before: $(df -h / | awk 'NR==2 {print $4}') free"
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo docker image prune -af 2>/dev/null || true
+          sudo apt-get clean
+          echo "after : $(df -h / | awk 'NR==2 {print $4}') free"
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -85,7 +114,8 @@ jobs:
           avail=$(df -Pm "$root" | awk 'NR==2 {print $4}')
           echo "free space: ${avail} MB"
           if [ "$avail" -lt 20000 ]; then
-            echo "::error::a kernel build needs about 20 GB free, this runner has ${avail} MB"
+            echo "::error::a kernel build needs about 20 GB free, this runner has ${avail} MB."
+            echo "::error::on a github-hosted runner check that the free-disk-space step ran and freed anything."
             exit 1
           fi
 
