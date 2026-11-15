@@ -1,0 +1,256 @@
+name: build-kernel
+
+# Builds the socrates kernel on the self-hosted runner that is attached to the
+# home server.
+#
+# Trigger it from the repository that owns the runner. A self-hosted runner
+# registered to an organisation is not visible to a personal fork, so a job
+# asking for it from the fork would sit in the queue forever.
+#
+# runs-on below uses the default labels (self-hosted, linux, x64). If the
+# runner was registered with an extra custom label, add it to that list.
+#
+# Everything expensive lives outside the workspace, under ~/.cache/socrates:
+# the clang toolchain, the KernelPatch checkout, and the incremental build
+# directory. checkout runs git clean -ffdx, which would delete all of it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Kernel release suffix, e.g. byxingstar. Empty keeps the version the tree declares."
+        required: false
+        default: ""
+        type: string
+      patch_kpm:
+        description: "Inject the KernelPatch runtime (required for KPM to work at runtime)"
+        required: false
+        default: true
+        type: boolean
+      pack_boot:
+        description: "Repack a flashable boot.img from the stock template on the runner"
+        required: false
+        default: true
+        type: boolean
+      full_rebuild:
+        description: "Wipe the incremental output directory first"
+        required: false
+        default: false
+        type: boolean
+
+  # A full build takes 10-15 minutes, so this is off by default. Uncomment to
+  # build on every push that touches something that affects the kernel.
+  # push:
+  #   branches: [lineage-24.0]
+  #   paths:
+  #     - build-socrates.sh
+  #     - scripts/**
+  #     - arch/arm64/configs/**
+  #     - fs/**
+  #     - drivers/kernelsu
+  #     - .github/workflows/build-kernel.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          clean: true
+
+      - name: Prepare cache directories
+        run: |
+          set -euo pipefail
+          root="$HOME/.cache/socrates"
+          mkdir -p "$root/toolchain" "$root/kp" "$root/out"
+          {
+            echo "CACHE_ROOT=$root"
+            echo "OUT_DIR=$root/out"
+            echo "CLANG_DIR=$root/toolchain/clang-r450784d"
+            echo "KP_CACHE=$root/kp"
+          } >> "$GITHUB_ENV"
+
+          avail=$(df -Pm "$root" | awk 'NR==2 {print $4}')
+          echo "free space: ${avail} MB"
+          if [ "$avail" -lt 20000 ]; then
+            echo "::error::a kernel build needs about 20 GB free, this runner has ${avail} MB"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          missing=""
+          for t in bc bison flex make python3 cpio rsync pahole dtc lz4 zstd openssl; do
+            command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+          done
+          if [ -z "$missing" ]; then
+            echo "all build dependencies already present"
+            exit 0
+          fi
+          echo "missing:$missing"
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::dependencies are missing and sudo is not passwordless on this runner"
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
+            lz4 zstd cpio kmod rsync python3 dwarves device-tree-compiler \
+            openssl curl git xz-utils
+
+      - name: Fetch clang-r450784d
+        run: |
+          set -euo pipefail
+          if [ -x "$CLANG_DIR/bin/clang" ]; then
+            echo "cached: $CLANG_DIR"
+            "$CLANG_DIR/bin/clang" --version | head -1
+            exit 0
+          fi
+          # Same version the stock HyperOS 4 kernel was built with. A different
+          # major version changes the CFI type hashes and the vendor modules
+          # stop loading.
+          tmp="$CACHE_ROOT/.clang-repo"
+          rm -rf "$tmp"
+          git clone --depth=1 --filter=blob:none --no-checkout \
+            -b android13-release \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 "$tmp"
+          git -C "$tmp" sparse-checkout init --cone
+          git -C "$tmp" sparse-checkout set clang-r450784d
+          git -C "$tmp" checkout android13-release
+          mv "$tmp/clang-r450784d" "$CACHE_ROOT/toolchain/"
+          rm -rf "$tmp"
+          "$CLANG_DIR/bin/clang" --version | head -1
+
+      - name: Unshallow the KernelSU submodule
+        run: |
+          set -euo pipefail
+          if [ ! -e KernelSU/kernel/Makefile ]; then
+            git submodule update --init KernelSU
+          fi
+          # SukiSU derives KSU_VERSION from the commit count and git describe of
+          # its own checkout, so a shallow submodule reports the wrong number.
+          if [ "$(git -C KernelSU rev-parse --is-shallow-repository)" = "true" ]; then
+            git -C KernelSU fetch --unshallow --tags
+          fi
+          echo "kernelsu $(git -C KernelSU describe --tags --always 2>/dev/null || echo unknown)"
+
+      - name: Locate stock boot image
+        env:
+          BOOT_STOCK_URL: ${{ secrets.BOOT_STOCK_URL }}
+        run: |
+          set -euo pipefail
+          tpl=""
+          for c in "$CACHE_ROOT/boot_stock.img" "$GITHUB_WORKSPACE/boot_stock.img"; do
+            if [ -f "$c" ]; then tpl="$c"; break; fi
+          done
+          if [ -z "$tpl" ] && [ -n "$BOOT_STOCK_URL" ]; then
+            curl -fL --retry 2 -o "$CACHE_ROOT/boot_stock.img" "$BOOT_STOCK_URL"
+            tpl="$CACHE_ROOT/boot_stock.img"
+          fi
+          if [ -n "$tpl" ]; then
+            echo "template: $tpl ($(stat -c%s "$tpl") bytes)"
+            echo "BOOT_TEMPLATE=$tpl" >> "$GITHUB_ENV"
+          else
+            echo "no stock boot image on this runner, the build will stop after Image"
+            echo "put one at $CACHE_ROOT/boot_stock.img or set the BOOT_STOCK_URL secret"
+          fi
+
+      - name: Build
+        env:
+          SKEY: ${{ secrets.KP_SUPERKEY }}
+          REL: ${{ inputs.release }}
+          PATCH_KPM: ${{ inputs.patch_kpm }}
+          PACK_BOOT: ${{ inputs.pack_boot }}
+          FULL_REBUILD: ${{ inputs.full_rebuild }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL_REBUILD" = "true" ]; then
+            echo "wiping $OUT_DIR"
+            rm -rf "$OUT_DIR"
+          fi
+
+          args=()
+          if [ -n "$REL" ]; then
+            args+=(--release "$REL")
+          fi
+          if [ "$PATCH_KPM" != "true" ]; then
+            args+=(--no-kpm)
+          fi
+          if [ "$PACK_BOOT" = "true" ] && [ -n "${BOOT_TEMPLATE:-}" ]; then
+            args+=(--stock "$BOOT_TEMPLATE")
+          else
+            args+=(--no-pack)
+            if [ "$PACK_BOOT" = "true" ]; then
+              echo "::warning::pack_boot requested but no stock template is available, skipping the repack"
+            fi
+          fi
+
+          export OUT="$OUT_DIR"
+          export JOBS="${JOBS:-$(nproc)}"
+          echo "build-socrates.sh ${args[*]:-}"
+          ./build-socrates.sh ${args[@]+"${args[@]}"} 2>&1 | tee build.log
+
+      - name: Collect artefacts
+        if: always()
+        run: |
+          set -euo pipefail
+          : "${OUT_DIR:=$HOME/.cache/socrates/out}"
+          mkdir -p artifacts
+          for f in "$OUT_DIR/arch/arm64/boot/Image" \
+                   "$OUT_DIR/arch/arm64/boot/Image.kp" \
+                   "$OUT_DIR/boot.img" \
+                   "$OUT_DIR/System.map" \
+                   "$OUT_DIR/include/config/kernel.release"; do
+            if [ -f "$f" ]; then cp "$f" artifacts/; fi
+          done
+          if [ -f "$OUT_DIR/.config" ]; then cp "$OUT_DIR/.config" artifacts/config; fi
+          ls -l artifacts
+
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          rel=$(cat artifacts/kernel.release 2>/dev/null || echo unknown)
+          {
+            echo "## socrates kernel build"
+            echo
+            echo "- release: \`$rel\`"
+            echo "- runner: \`$RUNNER_NAME\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo
+            if [ -d artifacts ] && [ -n "$(ls -A artifacts 2>/dev/null)" ]; then
+              echo "| artefact | size | sha256 |"
+              echo "|---|---|---|"
+              for f in artifacts/*; do
+                printf '| %s | %s | `%s` |\n' \
+                  "$(basename "$f")" \
+                  "$(stat -c%s "$f")" \
+                  "$(sha256sum "$f" | cut -c1-32)"
+              done
+            else
+              echo "no artefacts were produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: socrates-kernel-${{ github.run_number }}
+          path: |
+            artifacts/
+            build.log
+          if-no-files-found: warn
+          retention-days: 14

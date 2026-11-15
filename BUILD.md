@@ -173,10 +173,46 @@ adb pull /sdcard/boot.img boot_stock.img
 ## 6. 刷入
 
 ```bash
-fastboot flash boot_a out/arch/arm64/boot/Image.kp.boot.img   # 注意确认当前槽位
+fastboot getvar current-slot      # 先确认活动槽位
+fastboot flash boot_a out/boot.img
 ```
 
 回滚就是刷回原厂 boot。
+
+## 7. GitHub Actions（自建 runner）
+
+`.github/workflows/build-kernel.yml` 在绑定了家里小服务器的 self-hosted runner 上跑完整流程，
+产出 `Image` / `Image.kp` / `boot.img`，作为 artifact 上传。
+
+**必须在注册了该 runner 的仓库里触发。** 组织级 self-hosted runner 对个人 fork 不可见，
+在 fork 里点 Run workflow 只会一直排队。
+
+手动触发：
+
+```bash
+gh workflow run build-kernel -f release=byxingstar
+gh run watch
+```
+
+输入参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `release` | 空 | 内核版本后缀，空则用树自己的 `5.15.223` |
+| `patch_kpm` | `true` | 注入 KernelPatch（KPM 运行时） |
+| `pack_boot` | `true` | 打包 `boot.img`，需要机器上有原厂模板 |
+| `full_rebuild` | `false` | 先删掉增量输出目录，从头编 |
+
+**runner 上需要准备两样东西**（都存在 `~/.cache/socrates` 下，checkout 的 `git clean` 不会删）：
+
+1. **boot 模板**：放到 `~/.cache/socrates/boot_stock.img`。没有的话工作流会跳过打包并给出
+   warning，只出内核 Image。
+2. **两个 secret（可选）**：
+   - `KP_SUPERKEY`：KernelPatch 超级密钥。不设的话每次构建随机生成，密钥会变。
+   - `BOOT_STOCK_URL`：模板的直链，runner 上没有本地文件时用它下载。
+
+clang-r450784d（2.7 GB）和 KernelPatch 缓存都是首次运行时自动准备，之后直接复用。
+增量编译依赖 `~/.cache/socrates/out`，所以重复构建通常只要几分钟。
 
 ## 已验证
 
