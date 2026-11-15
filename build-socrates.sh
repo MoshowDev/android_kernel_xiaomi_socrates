@@ -11,16 +11,17 @@
 #   ./build-socrates.sh                  build Image, patch it, pack a boot image
 #   ./build-socrates.sh --no-kpm         skip the KernelPatch step
 #   ./build-socrates.sh --no-pack        skip the boot image, keep the Image
-#   ./build-socrates.sh --stock FILE     use FILE as the stock boot template
+#   ./build-socrates.sh --stock FILE     use FILE as the boot template instead of
+#                                        the built-in socrates layout
 #   ./build-socrates.sh --release STR    override the kernel release string;
 #               STR is either a full 5.15.<sublevel>[-suffix] string or a bare
-#               suffix such as "byxingstar", expanded to 5.15.194-byxingstar
+#               suffix such as "byxingstar", expanded to 5.15.223-byxingstar
 #
 # Environment:
 #   CLANG_DIR   AOSP prebuilt clang directory (must contain bin/clang)
-#   STOCK_BOOT  stock boot image used as the template for the flashable image;
-#               defaults to ./boot_stock.img, then ../boot_stock.img
-#   KERNEL_RELEASE  same as --release, e.g. 5.15.194-xingstar
+#   STOCK_BOOT  same as --stock; when empty the built-in socrates geometry and
+#               vbmeta blob are used, so no stock boot image is needed
+#   KERNEL_RELEASE  same as --release, e.g. 5.15.223-xingstar
 #   KP_DIR      ShirkNeko/SukiSU_KernelPatch_patch checkout; fetched and built
 #               into KP_CACHE automatically when missing
 #   KP_CACHE    cache root for KernelPatch and the Arm bare metal toolchain
@@ -330,40 +331,23 @@ fi
 
 if [ "$DO_PACK" = "1" ]; then
     step "packing boot image"
+    # A stock image is only needed to override the layout. The socrates
+    # geometry and the OEM signed vbmeta blob are built into pack_boot.py, so
+    # a normal build does not need boot_stock.img at all.
     if [ -z "$STOCK_BOOT" ]; then
         for cand in "$REPO/boot_stock.img" "$REPO/../boot_stock.img" "$REPO/stock_boot.img"; do
             if [ -f "$cand" ]; then STOCK_BOOT=$cand; break; fi
         done
     fi
-    if [ -z "$STOCK_BOOT" ] || [ ! -f "$STOCK_BOOT" ]; then
-        cat >&2 <<'EOF'
-error: no stock boot image to use as the template.
-
-A flashable boot image is made by swapping the kernel inside your own stock
-boot.img, so that the partition geometry and the AVB blob stay where the
-bootloader expects them. The script needs that file and it cannot ship with
-the tree.
-
-Drop it next to the tree and it is picked up automatically:
-
-    cp /path/to/boot.img ./boot_stock.img
-
-or point at it explicitly:
-
-    ./build-socrates.sh --stock /path/to/boot.img
-
-Pulling it from a rooted phone:
-
-    adb shell su -c 'dd if=/dev/block/by-name/boot of=/sdcard/boot.img'
-    adb pull /sdcard/boot.img boot_stock.img
-
-Pass --no-pack to stop after the kernel Image and skip this step.
-EOF
-        echo "  image: $IMAGE" >&2
+    if [ -n "$STOCK_BOOT" ] && [ ! -f "$STOCK_BOOT" ]; then
+        echo "error: --stock $STOCK_BOOT does not exist" >&2
         exit 1
     fi
-    echo "template: $STOCK_BOOT"
-    python3 "$REPO/scripts/pack_boot.py" --stock "$STOCK_BOOT" --kernel "$IMAGE" --out "$OUT/boot.img"
+    if [ -n "$STOCK_BOOT" ]; then
+        python3 "$REPO/scripts/pack_boot.py" --stock "$STOCK_BOOT" --kernel "$IMAGE" --out "$OUT/boot.img"
+    else
+        python3 "$REPO/scripts/pack_boot.py" --kernel "$IMAGE" --out "$OUT/boot.img"
+    fi
     PACKED="$OUT/boot.img"
 fi
 
