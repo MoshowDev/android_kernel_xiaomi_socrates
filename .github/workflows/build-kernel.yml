@@ -59,9 +59,15 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: build-kernel-${{ github.ref }}
-  cancel-in-progress: false
+# No concurrency block on purpose. Runs are allowed to pile up: a second
+# dispatch is accepted instead of waiting behind the first. What that buys
+# depends on the runner. github-hosted gives every run its own VM, so two runs
+# really do build in parallel. A self-hosted runner executes one job at a time,
+# so the second run sits queued until the first one finishes.
+#
+# Adding a concurrency group back would serialise runs per ref, and note that a
+# group holds at most one running plus one pending run: a third dispatch would
+# cancel the pending one rather than queue behind it.
 
 jobs:
   build:
