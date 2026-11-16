@@ -85,27 +85,22 @@ git checkout android13-release
    `scripts/setlocalversion` 读的是 auto.conf。不补一次 `touch .config && make syncconfig`，
    实际编出来的版本串会静默偏离 `.config` 里写的值，脚本的校验就会报错退出。
 
-3. **版本串按源码树自己的版本生成。**
-   默认：`5.15.223`（`Makefile` 的 `VERSION/PATCHLEVEL/SUBLEVEL`），
-   `CONFIG_LOCALVERSION` 留空 + `CONFIG_LOCALVERSION_AUTO` 关闭 + 环境里 `LOCALVERSION`
-   置空（否则 setlocalversion 追加 `+`）+ `BUILD_NUMBER` 不能存在（否则追加 `-ab<数字>`）。
+3. **版本串写死为 `5.15.223-byxingstar`。**
+   `SUBLEVEL=223` + `CONFIG_LOCALVERSION="-byxingstar"` +
+   `CONFIG_LOCALVERSION_AUTO` 关闭 + 环境里 `LOCALVERSION` 置空（否则 setlocalversion
+   追加 `+`）+ `BUILD_NUMBER` 不能存在（否则追加 `-ab<数字>`）。
    原厂 ROM 报的是 `5.15.194-android13-8-...`，这个前缀不参与 vendor 模块校验（见下节）。
 
-### 自定义版本号
+### 版本号不可改
 
-```bash
-./build-socrates.sh --release 5.15.223-xingstar   # 完整串
-./build-socrates.sh --release byxingstar          # 裸后缀，自动补成 5.15.223-byxingstar
-```
+脚本没有提供任何切换版本号的手段：传 `--release` 或设置 `KERNEL_RELEASE` 都会直接报错退出。
+理由很直白——这棵树只服务一台设备，`uname -r` 是管理器、设置页和日志里都能看到的东西，
+不该随每次构建漂移。
 
-`uname -r` 会变成 `5.15.223-xingstar`。不传这个参数时，版本串就是源码树的 `5.15.223`。
-
-内核的版本串由 `VERSION.PATCHLEVEL.SUBLEVEL` 加后缀拼成，所以裸名称不可能成为完整串。
-传一个不含 `5.15.` 前缀的值时，脚本会按默认 sublevel 展开并在开头打一行提示，避免必须
-手写前缀。
-
-实现上它会生成一个临时的配置片段（`$OUT/.release.config`），最后合并进去覆盖
-`CONFIG_LOCALVERSION`，同时按你给的 sublevel 覆盖 `SUBLEVEL`。
+实现上脚本固定 `SUBLEVEL=223`，并在合并配置时**最后**追加一个临时片段
+（`$OUT/.release.config`，内容 `CONFIG_LOCALVERSION="-byxingstar"`），所以即使有人去改
+`arch/arm64/configs/vendor/socrates-sukisu.config`，最终编出来的串也不会变。配置阶段结束后
+脚本会跑一次 `make kernelrelease` 和 `5.15.223-byxingstar` 比对，不一致就中止。
 
 **改这个串不会影响 vendor 模块加载。** 内核确实拿 vermagic 校验模块，但这个树是
 `CONFIG_MODVERSIONS=y`，模块带 CRC 时 `kernel/module.c` 里的 `same_magic()` 会跳过
@@ -203,7 +198,7 @@ fastboot flash boot_a out/boot.img
 手动触发：
 
 ```bash
-gh workflow run build-kernel -f runner=self-hosted -f release=byxingstar
+gh workflow run build-kernel -f runner=self-hosted
 gh run watch
 ```
 
@@ -212,10 +207,12 @@ gh run watch
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `runner` | `self-hosted` | `github-hosted` 用于没有自建 runner 的场景 |
-| `release` | 空 | 内核版本后缀，空则用树自己的 `5.15.223` |
 | `patch_kpm` | `true` | 注入 KernelPatch（KPM 运行时） |
 | `pack_boot` | `true` | 打包 `boot.img`（用内置布局，不需要模板） |
 | `full_rebuild` | `false` | 先删掉增量输出目录，从头编 |
+
+版本串不在这里暴露：CI 和本地一样固定 `5.15.223-byxingstar`，工作流原先那个 `release`
+输入已经删掉，否则它会传 `--release` 而被脚本拒绝。
 
 **两种 runner 都不需要准备任何厂商文件。** 打包所需的几何参数和 vbmeta 块都在
 `scripts/pack_boot.py` 里。
@@ -247,4 +244,4 @@ vermagic: 5.15.194-byxingstar SMP preempt mod_unload modversions aarch64
 407 个 vendor 模块全部加载，WiFi 已连接（1200 Mbps），`wm size` 正常，`boot_completed=1`。
 那次用的是自定义 release（`5.15.194-byxingstar`），正面验证了版本前缀不参与模块校验。
 
-默认构建现在报的是源码树自己的 `5.15.223`，行为与上面一致。
+默认构建现在固定报 `5.15.223-byxingstar`，行为与上面一致。

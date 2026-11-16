@@ -13,15 +13,15 @@
 #   ./build-socrates.sh --no-pack        skip the boot image, keep the Image
 #   ./build-socrates.sh --stock FILE     use FILE as the boot template instead of
 #                                        the built-in socrates layout
-#   ./build-socrates.sh --release STR    override the kernel release string;
-#               STR is either a full 5.15.<sublevel>[-suffix] string or a bare
-#               suffix such as "byxingstar", expanded to 5.15.223-byxingstar
+#
+# The kernel release string is pinned to 5.15.223-byxingstar. There is no knob
+# for it: --release is rejected and KERNEL_RELEASE in the environment aborts
+# the build. See the note about SUBLEVEL below.
 #
 # Environment:
 #   CLANG_DIR   AOSP prebuilt clang directory (must contain bin/clang)
 #   STOCK_BOOT  same as --stock; when empty the built-in socrates geometry and
 #               vbmeta blob are used, so no stock boot image is needed
-#   KERNEL_RELEASE  same as --release, e.g. 5.15.223-xingstar
 #   KP_DIR      ShirkNeko/SukiSU_KernelPatch_patch checkout; fetched and built
 #               into KP_CACHE automatically when missing
 #   KP_CACHE    cache root for KernelPatch and the Arm bare metal toolchain
@@ -38,9 +38,9 @@
 #      and CFI_CLANG. A kernel built without CFI cannot run the vendor modules
 #      that Xiaomi ships, because they are CFI instrumented.
 #
-#   2. SUBLEVEL=194 plus the pinned CONFIG_LOCALVERSION reproduce the stock
-#      HyperOS 4 release string byte for byte, so uname -r matches the ROM.
-#      It is not what decides whether vendor modules load: same_magic() in
+#   2. SUBLEVEL and CONFIG_LOCALVERSION are pinned together, because the string
+#      this build reports is 5.15.223-byxingstar and nothing else. That string
+#      is not what decides whether vendor modules load: same_magic() in
 #      kernel/module.c skips the release prefix once a module carries CRCs,
 #      so the flags part of the vermagic is the part that has to match.
 # ---------------------------------------------------------------------------
@@ -49,17 +49,15 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$REPO/out}
 JOBS=${JOBS:-}
-# The release the tree declares for itself. Everything below derives from it
-# unless --release overrides it, so the build reports 5.15.<tree sublevel>
-# instead of pretending to be the stock ROM kernel.
-TREE_RELEASE=$(awk '/^VERSION =/{v=$3} /^PATCHLEVEL =/{p=$3} /^SUBLEVEL =/{s=$3}
-                    END{if (s == "") printf "%s.%s", v, p; else printf "%s.%s.%s", v, p, s}' \
-                "$REPO/Makefile")
-DEFAULT_SUBLEVEL=${TREE_RELEASE##*.}
-KV_SUBLEVEL=""
-EXPECTED_RELEASE="$TREE_RELEASE"
-RELEASE_OVERRIDE=${KERNEL_RELEASE:-}
-RELEASE_LOCALVERSION=""
+# The release string is fixed. This tree is built for exactly one device and
+# one ROM, and uname -r is what the manager, the settings screen and anyone
+# reading logs sees, so it is not something to vary per build. Both halves are
+# pinned: SUBLEVEL because the suffix repeats the same number, and
+# CONFIG_LOCALVERSION for the part after it.
+PINNED_RELEASE="5.15.223-byxingstar"
+PINNED_SUBLEVEL=223
+PINNED_LOCALVERSION="-byxingstar"
+EXPECTED_RELEASE="$PINNED_RELEASE"
 DO_KPM=1
 DO_PACK=1
 STOCK_BOOT=${STOCK_BOOT:-}
@@ -72,9 +70,14 @@ while [ $# -gt 0 ]; do
         --kpm)    DO_KPM=1; shift ;;
         --no-pack) DO_PACK=0; shift ;;
         --release)
-            RELEASE_OVERRIDE=${2:-}
-            [ -n "$RELEASE_OVERRIDE" ] || { echo "--release needs a string" >&2; exit 1; }
-            shift 2 ;;
+            cat >&2 <<EOF
+error: the kernel release is pinned to $PINNED_RELEASE and cannot be changed.
+
+Changing it would not break module loading, since same_magic() ignores the
+release prefix once a module carries CRCs, but it would change what uname -r
+and the manager report, and this tree targets one device. Drop the flag.
+EOF
+            exit 1 ;;
         --stock|--pack)
             STOCK_BOOT=${2:-}
             [ -n "$STOCK_BOOT" ] || { echo "$1 needs a path" >&2; exit 1; }
@@ -90,47 +93,11 @@ step() { printf '\n===== %s =====\n' "$*"; }
 # the tree root, so anchor the working directory before anything else runs.
 cd "$REPO"
 
-# --release rewrites the kernel release string, so uname -r and the settings
-# screen show something else. It is opt in, and it states what it does and does
-# not affect: the release prefix is not what vendor modules are checked on.
-if [ -n "$RELEASE_OVERRIDE" ]; then
-    # The kernel assembles its release string from VERSION.PATCHLEVEL.SUBLEVEL
-    # plus the localversion suffix, so a bare name can never be the whole
-    # string. Accept one anyway and expand it against the default sublevel,
-    # which is what someone typing their own name actually means.
-    case "$RELEASE_OVERRIDE" in
-        5.15.*) : ;;
-        *)
-            RELEASE_OVERRIDE="5.15.${DEFAULT_SUBLEVEL}-${RELEASE_OVERRIDE#-}"
-            echo "note: --release expanded to '$RELEASE_OVERRIDE'" >&2
-            ;;
-    esac
-    if [[ ! "$RELEASE_OVERRIDE" =~ ^5\.15\.([0-9]+)(.*)$ ]]; then
-        echo "error: --release must be 5.15.<sublevel>[-suffix] or a bare suffix, got '$RELEASE_OVERRIDE'" >&2
-        exit 1
-    fi
-    KV_SUBLEVEL="${BASH_REMATCH[1]}"
-    RELEASE_LOCALVERSION="${BASH_REMATCH[2]}"
-    EXPECTED_RELEASE="$RELEASE_OVERRIDE"
-    cat >&2 <<'EOF'
-
-  ############################################################
-  #  NOTE: custom kernel release requested
-  #
-  #  Only the part after the first space of the vermagic is
-  #  compared when the module carries symbol CRCs, which every
-  #  prebuilt vendor_dlkm module does on a MODVERSIONS kernel.
-  #  See same_magic() in kernel/module.c. The release prefix is
-  #  ignored, so changing it does not stop modules from loading
-  #  as long as the flags part (SMP preempt mod_unload modversions
-  #  aarch64) stays identical, which it does here.
-  #
-  #  What would break loading is a different module ABI: other
-  #  KMI generation, a different compiler affecting CFI, or
-  #  symbols whose CRC drifted. Keep the stock boot image around
-  #  anyway.
-  ############################################################
-EOF
+# The release is pinned, so refuse an override arriving through the
+# environment; the only other way in used to be a flag.
+if [ -n "${KERNEL_RELEASE:-}" ]; then
+    echo "error: KERNEL_RELEASE is set ($KERNEL_RELEASE), but the release is pinned to $PINNED_RELEASE" >&2
+    exit 1
 fi
 
 step "kernelsu submodule"
@@ -211,12 +178,10 @@ echo "jobs : $JOBS"
 export LOCALVERSION=""
 unset BUILD_NUMBER || true
 
-MAKE_ARGS=(-C "$REPO" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1)
-# SUBLEVEL is only forced when a release was requested. Left alone, the tree
-# reports the version its own Makefile declares.
-if [ -n "$KV_SUBLEVEL" ]; then
-    MAKE_ARGS+=(SUBLEVEL="$KV_SUBLEVEL")
-fi
+# SUBLEVEL is passed explicitly instead of being read from the tree Makefile:
+# the release string has to stay 5.15.223-byxingstar even if the tree is later
+# rebased onto a newer stable point release.
+MAKE_ARGS=(-C "$REPO" O="$OUT" ARCH=arm64 LLVM=1 LLVM_IAS=1 SUBLEVEL="$PINNED_SUBLEVEL")
 
 # Regenerating the config rewrites include/config/auto.conf, which marks every
 # object stale, so a plain repeat run of this script would rebuild the whole
@@ -229,7 +194,7 @@ CONFIG_HASH=$(
         arch/arm64/configs/vendor/socrates-sukisu.config |
     sha256sum | cut -d" " -f1
 )
-CONFIG_HASH="${CONFIG_HASH}-sub${KV_SUBLEVEL:-tree}${RELEASE_LOCALVERSION}"
+CONFIG_HASH="${CONFIG_HASH}-sub${PINNED_SUBLEVEL}${PINNED_LOCALVERSION}"
 CONFIG_STAMP="$OUT/.socrates-config"
 
 if [ -f "$CONFIG_STAMP" ] && [ "$(cat "$CONFIG_STAMP")" = "$CONFIG_HASH" ] && [ -f "$OUT/.config" ]; then
@@ -244,12 +209,11 @@ else
         arch/arm64/configs/vendor/socrates_GKI.config
         arch/arm64/configs/vendor/socrates-sukisu.config
     )
-    if [ -n "$RELEASE_OVERRIDE" ]; then
-        # merged last so it wins over the pinned value in socrates-sukisu.config
-        printf '# CONFIG_LOCALVERSION_AUTO is not set\nCONFIG_LOCALVERSION="%s"\n' \
-            "$RELEASE_LOCALVERSION" > "$OUT/.release.config"
-        FRAGMENTS+=("$OUT/.release.config")
-    fi
+    # Always merged last, so the pinned suffix wins even if someone edits the
+    # fragment in arch/arm64/configs/vendor.
+    printf '# CONFIG_LOCALVERSION_AUTO is not set\nCONFIG_LOCALVERSION="%s"\n' \
+        "$PINNED_LOCALVERSION" > "$OUT/.release.config"
+    FRAGMENTS+=("$OUT/.release.config")
     scripts/kconfig/merge_config.sh -m -O "$OUT" "$OUT/.config" "${FRAGMENTS[@]}"
 
     step "olddefconfig"
@@ -378,10 +342,6 @@ if [ -n "${PACKED:-}" ]; then
     echo "boot    : $PACKED"
     echo "boot sha: $(sha256sum "$PACKED" | cut -d' ' -f1)"
 fi
-echo "release : $RELEASE"
-if [ -n "$RELEASE_OVERRIDE" ]; then
-    echo "note    : custom release; vendor modules still load, same_magic() ignores"
-    echo "          the release prefix when the module carries CRCs"
-fi
+echo "release : $RELEASE (pinned)"
 echo "sha256  : $(sha256sum "$IMAGE" | cut -d' ' -f1)"
 strings -a "$IMAGE" | grep -m1 '^Linux version 5' || true

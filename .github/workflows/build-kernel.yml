@@ -23,11 +23,6 @@ on:
         options:
           - self-hosted
           - github-hosted
-      release:
-        description: "Kernel release suffix, e.g. byxingstar. Empty keeps the version the tree declares."
-        required: false
-        default: ""
-        type: string
       patch_kpm:
         description: "Inject the KernelPatch runtime (required for KPM to work at runtime)"
         required: false
@@ -208,7 +203,6 @@ jobs:
       - name: Build
         env:
           SKEY: ${{ secrets.KP_SUPERKEY }}
-          REL: ${{ inputs.release }}
           PATCH_KPM: ${{ inputs.patch_kpm }}
           PACK_BOOT: ${{ inputs.pack_boot }}
           FULL_REBUILD: ${{ inputs.full_rebuild }}
@@ -220,9 +214,6 @@ jobs:
           fi
 
           args=()
-          if [ -n "$REL" ]; then
-            args+=(--release "$REL")
-          fi
           if [ "$PATCH_KPM" != "true" ]; then
             args+=(--no-kpm)
           fi
