@@ -115,20 +115,84 @@ fi
 echo "kernelsu: $(git -C "$REPO/KernelSU" log --oneline -1 2>/dev/null || echo unknown)"
 
 step "local kernelsu patches"
-# The avc_spoof feature exists on upstream main only; builtin carries the SUSFS
-# options instead. This patch ports it across, and is applied here rather than
-# committed so the submodule keeps pointing at an upstream commit.
-# Reverse-check first: the submodule worktree may still carry it from an
-# earlier build.
+# The avc_spoof feature exists on upstream main only, while builtin is the
+# branch that carries the SUSFS options. The port lives in kernel-patches/ and
+# is applied here instead of being committed, so the submodule keeps pointing
+# at an upstream commit that anyone can fetch.
+#
+# Failures are loud on purpose: a half applied patch still compiles, and the
+# resulting kernel would silently lack the feature.
+KSU_DIR="$REPO/KernelSU"
+KSU_PATCH_BASE="f9aa2fec23c3f4a06a935f69dc04cb85b261e7f3"
+KSU_HEAD=$(git -C "$KSU_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+if [ "$KSU_HEAD" != "$KSU_PATCH_BASE" ]; then
+    echo "note: KernelSU is at ${KSU_HEAD:0:10}, the patches were written against"
+    echo "      ${KSU_PATCH_BASE:0:10}, so they get merged three-way. If that merge"
+    echo "      conflicts, see kernel-patches/README.md."
+fi
+
 for p in "$REPO"/kernel-patches/*.diff; do
     [ -f "$p" ] || continue
-    if git -C "$REPO/KernelSU" apply --reverse --check "$p" 2>/dev/null; then
-        echo "already applied: $(basename "$p")"
-    else
-        git -C "$REPO/KernelSU" apply "$p"
-        echo "applied        : $(basename "$p")"
+    name=$(basename "$p")
+
+    # The worktree may still carry the patch from an earlier build.
+    if git -C "$KSU_DIR" apply --reverse --check "$p" 2>/dev/null; then
+        echo "already applied : $name"
+        continue
     fi
+
+    if git -C "$KSU_DIR" apply "$p" 2>/dev/null; then
+        echo "applied         : $name"
+        continue
+    fi
+
+    # Plain apply matches context lines, so it gives up the moment upstream
+    # edits anything near a hunk. The patch records the blob ids it was made
+    # from, so retry as a three-way merge: git can then reconcile instead of
+    # pattern matching, and it reports a real conflict only when the edited
+    # lines themselves changed.
+    if err=$(git -C "$KSU_DIR" apply --3way "$p" 2>&1); then
+        git -C "$KSU_DIR" reset -q   # keep the worktree, drop the index entries
+        echo "applied  (3-way) : $name"
+        echo "  context drifted upstream and was merged rather than matched;"
+        echo "  review it with: git -C KernelSU diff"
+        continue
+    fi
+
+    unmerged=$(git -C "$KSU_DIR" diff --name-only --diff-filter=U 2>/dev/null | tr "\n" " ")
+    {
+        printf "\nerror: %s does not apply to KernelSU at %s\n\n" "$name" "$KSU_HEAD"
+        printf "%s\n" "$err"
+        printf "\nFiles left with conflict markers: %s\n" "${unmerged:-none}"
+        cat <<"EOF"
+
+A conflict means upstream changed the very lines this patch edits, so the port
+has to be reconciled by hand. Nothing was built.
+
+Reset the submodule worktree, then redo the port against the new base:
+
+    git -C KernelSU reset -q
+    git -C KernelSU checkout -- .
+    git -C KernelSU clean -fd
+
+kernel-patches/README.md describes how to regenerate the patch once the code is
+right.
+EOF
+    } >&2
+    exit 1
 done
+
+# A merge that was interrupted halfway can leave markers in the worktree with a
+# clean index, and the compiler would then fail somewhere unrelated.
+markers=$(git -C "$KSU_DIR" grep -l "^<<<<<<< " -- . 2>/dev/null || true)
+if [ -n "$markers" ]; then
+    {
+        printf "\nerror: conflict markers left inside KernelSU:\n"
+        printf "  %s\n" $markers
+        printf "\nRun:\n    git -C KernelSU reset -q && git -C KernelSU checkout -- .\n\n"
+    } >&2
+    exit 1
+fi
 
 step "locating clang"
 if [ -z "${CLANG_DIR:-}" ]; then

@@ -16,6 +16,9 @@
 - `git submodule update --force KernelSU` 之后再编译会自动重新打上
 - 补丁目录叫 `kernel-patches/`、文件用 `.diff`，因为内核树的 `.gitignore` 忽略了 `patches/` 和 `*.patch`
 
+上游改动导致补丁打不上时，脚本会先退回三方合并（吸收锚点附近的漂移），只有真正改了被编辑的那几行才
+报冲突并中止编译。冲突的处理与补丁重做步骤见 `kernel-patches/README.md`。
+
 ## 0. 拉取
 
 KernelSU 是子模块，**必须递归拉取**：
