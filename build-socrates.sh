@@ -82,7 +82,7 @@ EOF
             STOCK_BOOT=${2:-}
             [ -n "$STOCK_BOOT" ] || { echo "$1 needs a path" >&2; exit 1; }
             shift 2 ;;
-        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,/^set -euo pipefail/{/^set -euo pipefail/d;p}' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
 done
